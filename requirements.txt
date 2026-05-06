@@ -5,3 +5,4 @@ httpx==0.28.1
 pydantic==2.11.3
 python-dotenv==1.1.0
 aiosqlite==0.21.0
+fpdf2==2.8.3

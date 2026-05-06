@@ -38,3 +38,20 @@ export async function fetchAnalysis(id: string): Promise<AnalysisReport> {
 export async function fetchAnalysisHistory(): Promise<{ reports: AnalysisReport[] }> {
   return fetchJson("/api/analysis");
 }
+
+export async function downloadAnalysisPdf(id: string): Promise<void> {
+  const res = await fetch(`/api/analysis/${id}/pdf`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error((body as { error?: string }).error || res.statusText);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const disposition = res.headers.get("Content-Disposition");
+  const filename = disposition?.match(/filename="(.+)"/)?.[1] || `analysis_${id}.pdf`;
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}

@@ -10,9 +10,9 @@ from typing import Optional
 import httpx
 import anthropic
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 load_dotenv()
@@ -22,6 +22,15 @@ FILES_BASE_URL = os.getenv("FILES_BASE_URL", "https://app.files.com/api/rest/v1"
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "") or os.getenv("CLAUDE_API_KEY", "")
 
 app = FastAPI(title="Madison File Reviews")
+
+
+@app.exception_handler(422)
+async def validation_exception_handler(request: Request, exc: Exception):
+    import traceback
+    print(f"422 ERROR on {request.method} {request.url}")
+    traceback.print_exc()
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
+
 
 # ---------------------------------------------------------------------------
 # Database
@@ -79,18 +88,24 @@ async def _fetch_with_retry(client: httpx.AsyncClient, url: str) -> httpx.Respon
             await asyncio.sleep(delay)
             continue
         if resp.status_code >= 400:
-            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+            body = resp.text
+            print(f"Files.com API error: {resp.status_code} for URL: {url}")
+            print(f"  Response: {body[:500]}")
+            raise HTTPException(status_code=502, detail=f"Files.com returned {resp.status_code}: {body[:200]}")
         return resp
-    raise HTTPException(status_code=429, detail="Files.com rate limit exceeded")
+    raise HTTPException(status_code=502, detail="Files.com rate limit exceeded")
 
 
 async def list_folder(path: str) -> list[dict]:
+    if path and not path.startswith("/"):
+        path = "/" + path
     items: list[dict] = []
     cursor: Optional[str] = None
     async with httpx.AsyncClient(timeout=30) as client:
         while True:
             encoded = _encode_path(path)
             url = f"{FILES_BASE_URL}/folders/{encoded}?per_page={ITEMS_PER_PAGE}"
+            print(f"Files.com request: {url}")
             if cursor:
                 url += f"&cursor={cursor}"
             resp = await _fetch_with_retry(client, url)
@@ -386,12 +401,153 @@ async def get_analysis(report_id: str):
     return _serialize_report(row)
 
 
+@app.get("/api/analysis/{report_id}/pdf")
+async def export_analysis_pdf(report_id: str):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM analysis_reports WHERE id=?", (report_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Report not found")
+    report = _serialize_report(row)
+    if report.get("status") != "complete":
+        raise HTTPException(status_code=400, detail="Report is not complete")
+
+    pdf_bytes = _generate_pdf(report)
+    safe_name = report["path"].replace("/", "_").replace(" ", "_").strip("_")
+    filename = f"analysis_{safe_name}_{report_id[:8]}.pdf"
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.get("/api/analysis")
 async def list_analysis_reports():
     conn = get_db()
     rows = conn.execute("SELECT * FROM analysis_reports ORDER BY created_at DESC LIMIT 50").fetchall()
     conn.close()
     return {"reports": [_serialize_report(r) for r in rows]}
+
+
+def _generate_pdf(report: dict) -> bytes:
+    from fpdf import FPDF
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=20)
+    pdf.add_page()
+
+    # Title
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.cell(0, 12, "File Review Analysis Report", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+
+    # Directory path
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(0, 6, report["path"], new_x="LMARGIN", new_y="NEXT")
+
+    # Score and date
+    score = report.get("overallScore", "unknown")
+    completed = report.get("completedAt", "")
+    if completed:
+        try:
+            completed = datetime.fromisoformat(completed).strftime("%B %d, %Y at %I:%M %p")
+        except (ValueError, TypeError):
+            pass
+
+    pdf.cell(0, 6, f"Overall Score: {score.replace('-', ' ').title()}    |    {completed}", new_x="LMARGIN", new_y="NEXT")
+    if report.get("model"):
+        pdf.cell(0, 6, f"Model: {report['model']}", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    # Summary
+    if report.get("summary"):
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(0, 8, "Summary", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 10)
+        pdf.multi_cell(0, 5, report["summary"])
+        pdf.ln(4)
+
+    # Findings
+    findings = report.get("findings", [])
+    if findings:
+        severity_order = {"critical": 0, "warning": 1, "info": 2}
+        findings_sorted = sorted(findings, key=lambda f: severity_order.get(f.get("severity", "info"), 3))
+
+        severity_colors = {
+            "critical": (220, 38, 38),
+            "warning": (217, 119, 6),
+            "info": (37, 99, 235),
+        }
+
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.set_text_color(0, 0, 0)
+        pdf.cell(0, 8, f"Findings ({len(findings)})", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+
+        for i, finding in enumerate(findings_sorted):
+            severity = finding.get("severity", "info")
+            r, g, b = severity_colors.get(severity, (100, 100, 100))
+
+            # Severity + Title
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.set_text_color(r, g, b)
+            pdf.cell(0, 6, f"[{severity.upper()}] {finding.get('title', 'Untitled')}", new_x="LMARGIN", new_y="NEXT")
+
+            # Category
+            pdf.set_font("Helvetica", "I", 9)
+            pdf.set_text_color(120, 120, 120)
+            pdf.cell(0, 5, f"Category: {finding.get('category', 'other')}", new_x="LMARGIN", new_y="NEXT")
+
+            # Description
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(40, 40, 40)
+            pdf.multi_cell(0, 4.5, finding.get("description", ""))
+
+            # Affected path
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.set_text_color(60, 60, 60)
+            affected = finding.get("affectedPath", "")
+            if affected:
+                pdf.cell(0, 5, f"Path: {affected}", new_x="LMARGIN", new_y="NEXT")
+
+            # Expected vs Actual
+            expected = finding.get("expectedBehavior", "")
+            actual = finding.get("actualBehavior", "")
+            if expected:
+                pdf.set_font("Helvetica", "", 9)
+                pdf.set_text_color(60, 60, 60)
+                pdf.multi_cell(0, 4.5, f"Expected: {expected}")
+            if actual:
+                pdf.set_font("Helvetica", "", 9)
+                pdf.set_text_color(60, 60, 60)
+                pdf.multi_cell(0, 4.5, f"Actual: {actual}")
+
+            pdf.ln(4)
+
+    # Recommendations
+    recommendations = report.get("recommendations", [])
+    if recommendations:
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.set_text_color(0, 0, 0)
+        pdf.cell(0, 8, "Recommendations", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+        pdf.set_font("Helvetica", "", 10)
+        pdf.set_text_color(40, 40, 40)
+        for j, rec in enumerate(recommendations, 1):
+            pdf.multi_cell(0, 5, f"{j}. {rec}")
+            pdf.ln(1)
+
+    # Footer
+    pdf.ln(8)
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.set_text_color(150, 150, 150)
+    pdf.cell(0, 5, f"Generated by Madison File Reviews", new_x="LMARGIN", new_y="NEXT")
+
+    return pdf.output()
 
 
 def _serialize_report(row: sqlite3.Row) -> dict:

@@ -1,8 +1,10 @@
-import { Loader2, CheckCircle2, XCircle, ArrowLeft } from "lucide-react";
+import { useState } from "react";
+import { Loader2, CheckCircle2, XCircle, ArrowLeft, Download } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import FindingSeverityBadge from "./FindingSeverityBadge";
+import { downloadAnalysisPdf } from "@/lib/api";
 import type { AnalysisReport as Report } from "@/types";
 
 interface AnalysisReportProps {
@@ -24,6 +26,7 @@ function ScoreBadge({ score }: { score: string }) {
 }
 
 export default function AnalysisReport({ report, onBack }: AnalysisReportProps) {
+  const [exporting, setExporting] = useState(false);
   if (report.status === "processing") {
     return (
       <div className="flex flex-col items-center justify-center py-20 gap-4">
@@ -64,9 +67,27 @@ export default function AnalysisReport({ report, onBack }: AnalysisReportProps) 
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-3">
+      <div className="flex items-center justify-between">
         <Button variant="ghost" size="sm" onClick={onBack}>
           <ArrowLeft className="size-4" /> Back to browser
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={exporting}
+          onClick={async () => {
+            setExporting(true);
+            try {
+              await downloadAnalysisPdf(report.id);
+            } catch (e) {
+              console.error("PDF export failed:", e);
+            } finally {
+              setExporting(false);
+            }
+          }}
+        >
+          {exporting ? <Loader2 className="size-4 animate-spin" /> : <Download className="size-4" />}
+          Export PDF
         </Button>
       </div>
 

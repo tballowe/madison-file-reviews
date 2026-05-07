@@ -574,7 +574,7 @@ def _serialize_report(row: sqlite3.Row) -> dict:
 # Serve the React frontend (built static files)
 # ---------------------------------------------------------------------------
 
-DIST_DIR = Path("dist")
+DIST_DIR = Path(__file__).parent / "dist"
 if DIST_DIR.exists() and (DIST_DIR / "index.html").exists():
     app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
 

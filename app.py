@@ -431,6 +431,38 @@ async def list_analysis_reports():
     return {"reports": [_serialize_report(r) for r in rows]}
 
 
+_PDF_CHAR_REPLACEMENTS = {
+    "\u2013": "-",
+    "\u2014": "--",
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201a": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u201e": '"',
+    "\u2026": "...",
+    "\u2022": "*",
+    "\u00a0": " ",
+    "\u202f": " ",
+    "\u2009": " ",
+    "\u200b": "",
+    "\u2192": "->",
+    "\u2190": "<-",
+    "\u2191": "^",
+    "\u2193": "v",
+}
+
+
+def _safe(text) -> str:
+    """Coerce text to something fpdf2's Latin-1 core fonts can render."""
+    if text is None:
+        return ""
+    s = str(text)
+    for src, dst in _PDF_CHAR_REPLACEMENTS.items():
+        s = s.replace(src, dst)
+    return s.encode("latin-1", "replace").decode("latin-1")
+
+
 def _generate_pdf(report: dict) -> bytes:
     from fpdf import FPDF
 
@@ -438,17 +470,14 @@ def _generate_pdf(report: dict) -> bytes:
     pdf.set_auto_page_break(auto=True, margin=20)
     pdf.add_page()
 
-    # Title
     pdf.set_font("Helvetica", "B", 18)
-    pdf.cell(0, 12, "File Review Analysis Report", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 12, _safe("File Review Analysis Report"), new_x="LMARGIN", new_y="NEXT")
     pdf.ln(2)
 
-    # Directory path
     pdf.set_font("Helvetica", "", 10)
     pdf.set_text_color(100, 100, 100)
-    pdf.cell(0, 6, report["path"], new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, _safe(report["path"]), new_x="LMARGIN", new_y="NEXT")
 
-    # Score and date
     score = report.get("overallScore", "unknown")
     completed = report.get("completedAt", "")
     if completed:
@@ -457,21 +486,19 @@ def _generate_pdf(report: dict) -> bytes:
         except (ValueError, TypeError):
             pass
 
-    pdf.cell(0, 6, f"Overall Score: {score.replace('-', ' ').title()}    |    {completed}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, _safe(f"Overall Score: {score.replace('-', ' ').title()}    |    {completed}"), new_x="LMARGIN", new_y="NEXT")
     if report.get("model"):
-        pdf.cell(0, 6, f"Model: {report['model']}", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 6, _safe(f"Model: {report['model']}"), new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
 
-    # Summary
     if report.get("summary"):
         pdf.set_text_color(0, 0, 0)
         pdf.set_font("Helvetica", "B", 12)
-        pdf.cell(0, 8, "Summary", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 8, _safe("Summary"), new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("Helvetica", "", 10)
-        pdf.multi_cell(0, 5, report["summary"])
+        pdf.multi_cell(0, 5, _safe(report["summary"]))
         pdf.ln(4)
 
-    # Findings
     findings = report.get("findings", [])
     if findings:
         severity_order = {"critical": 0, "warning": 1, "info": 2}
@@ -485,69 +512,62 @@ def _generate_pdf(report: dict) -> bytes:
 
         pdf.set_font("Helvetica", "B", 12)
         pdf.set_text_color(0, 0, 0)
-        pdf.cell(0, 8, f"Findings ({len(findings)})", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 8, _safe(f"Findings ({len(findings)})"), new_x="LMARGIN", new_y="NEXT")
         pdf.ln(2)
 
         for i, finding in enumerate(findings_sorted):
             severity = finding.get("severity", "info")
             r, g, b = severity_colors.get(severity, (100, 100, 100))
 
-            # Severity + Title
             pdf.set_font("Helvetica", "B", 10)
             pdf.set_text_color(r, g, b)
-            pdf.cell(0, 6, f"[{severity.upper()}] {finding.get('title', 'Untitled')}", new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(0, 6, _safe(f"[{severity.upper()}] {finding.get('title', 'Untitled')}"), new_x="LMARGIN", new_y="NEXT")
 
-            # Category
             pdf.set_font("Helvetica", "I", 9)
             pdf.set_text_color(120, 120, 120)
-            pdf.cell(0, 5, f"Category: {finding.get('category', 'other')}", new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(0, 5, _safe(f"Category: {finding.get('category', 'other')}"), new_x="LMARGIN", new_y="NEXT")
 
-            # Description
             pdf.set_font("Helvetica", "", 9)
             pdf.set_text_color(40, 40, 40)
-            pdf.multi_cell(0, 4.5, finding.get("description", ""))
+            pdf.multi_cell(0, 4.5, _safe(finding.get("description", "")))
 
-            # Affected path
             pdf.set_font("Helvetica", "B", 9)
             pdf.set_text_color(60, 60, 60)
             affected = finding.get("affectedPath", "")
             if affected:
-                pdf.cell(0, 5, f"Path: {affected}", new_x="LMARGIN", new_y="NEXT")
+                pdf.cell(0, 5, _safe(f"Path: {affected}"), new_x="LMARGIN", new_y="NEXT")
 
-            # Expected vs Actual
             expected = finding.get("expectedBehavior", "")
             actual = finding.get("actualBehavior", "")
             if expected:
                 pdf.set_font("Helvetica", "", 9)
                 pdf.set_text_color(60, 60, 60)
-                pdf.multi_cell(0, 4.5, f"Expected: {expected}")
+                pdf.multi_cell(0, 4.5, _safe(f"Expected: {expected}"))
             if actual:
                 pdf.set_font("Helvetica", "", 9)
                 pdf.set_text_color(60, 60, 60)
-                pdf.multi_cell(0, 4.5, f"Actual: {actual}")
+                pdf.multi_cell(0, 4.5, _safe(f"Actual: {actual}"))
 
             pdf.ln(4)
 
-    # Recommendations
     recommendations = report.get("recommendations", [])
     if recommendations:
         pdf.set_font("Helvetica", "B", 12)
         pdf.set_text_color(0, 0, 0)
-        pdf.cell(0, 8, "Recommendations", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 8, _safe("Recommendations"), new_x="LMARGIN", new_y="NEXT")
         pdf.ln(2)
         pdf.set_font("Helvetica", "", 10)
         pdf.set_text_color(40, 40, 40)
         for j, rec in enumerate(recommendations, 1):
-            pdf.multi_cell(0, 5, f"{j}. {rec}")
+            pdf.multi_cell(0, 5, _safe(f"{j}. {rec}"))
             pdf.ln(1)
 
-    # Footer
     pdf.ln(8)
     pdf.set_font("Helvetica", "I", 8)
     pdf.set_text_color(150, 150, 150)
-    pdf.cell(0, 5, f"Generated by Madison File Reviews", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 5, _safe("Generated by Madison File Reviews"), new_x="LMARGIN", new_y="NEXT")
 
-    return pdf.output()
+    return bytes(pdf.output())
 
 
 def _serialize_report(row: sqlite3.Row) -> dict:

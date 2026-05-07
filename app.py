@@ -431,52 +431,86 @@ async def list_analysis_reports():
     return {"reports": [_serialize_report(r) for r in rows]}
 
 
-_PDF_CHAR_REPLACEMENTS = {
-    "\u2013": "-",
-    "\u2014": "--",
-    "\u2018": "'",
-    "\u2019": "'",
-    "\u201a": "'",
-    "\u201c": '"',
-    "\u201d": '"',
-    "\u201e": '"',
-    "\u2026": "...",
-    "\u2022": "*",
-    "\u00a0": " ",
-    "\u202f": " ",
-    "\u2009": " ",
-    "\u200b": "",
-    "\u2192": "->",
-    "\u2190": "<-",
-    "\u2191": "^",
-    "\u2193": "v",
-}
-
-
-def _safe(text) -> str:
-    """Coerce text to something fpdf2's Latin-1 core fonts can render."""
+def _xml_escape(text) -> str:
+    """Escape text for use in ReportLab's Paragraph XML markup."""
     if text is None:
         return ""
     s = str(text)
-    for src, dst in _PDF_CHAR_REPLACEMENTS.items():
-        s = s.replace(src, dst)
-    return s.encode("latin-1", "replace").decode("latin-1")
+    s = s.replace("&", "&amp;")
+    s = s.replace("<", "&lt;")
+    s = s.replace(">", "&gt;")
+    return s
 
 
 def _generate_pdf(report: dict) -> bytes:
-    from fpdf import FPDF
+    from io import BytesIO
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.colors import HexColor, Color
+    from reportlab.lib.units import inch
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=20)
-    pdf.add_page()
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=letter,
+        leftMargin=0.75 * inch,
+        rightMargin=0.75 * inch,
+        topMargin=0.75 * inch,
+        bottomMargin=0.75 * inch,
+    )
 
-    pdf.set_font("Helvetica", "B", 18)
-    pdf.cell(0, 12, _safe("File Review Analysis Report"), new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(2)
+    styles = getSampleStyleSheet()
 
-    pdf.set_font("Helvetica", "", 10)
-    pdf.set_text_color(100, 100, 100)
-    pdf.cell(0, 6, _safe(report["path"]), new_x="LMARGIN", new_y="NEXT")
+    style_title = ParagraphStyle(
+        "ReportTitle", parent=styles["Heading1"], fontSize=18, spaceAfter=4,
+    )
+    style_path = ParagraphStyle(
+        "ReportPath", parent=styles["Normal"], fontSize=10,
+        textColor=HexColor("#646464"), spaceAfter=2,
+    )
+    style_meta = ParagraphStyle(
+        "ReportMeta", parent=styles["Normal"], fontSize=10,
+        textColor=HexColor("#646464"), spaceAfter=12,
+    )
+    style_heading = ParagraphStyle(
+        "SectionHeading", parent=styles["Heading2"], fontSize=12, spaceAfter=6,
+    )
+    style_body = ParagraphStyle(
+        "Body", parent=styles["Normal"], fontSize=10, leading=14, spaceAfter=8,
+    )
+    style_finding_title = ParagraphStyle(
+        "FindingTitle", parent=styles["Normal"], fontSize=10,
+        leading=13, spaceBefore=4, spaceAfter=2,
+    )
+    style_finding_detail = ParagraphStyle(
+        "FindingDetail", parent=styles["Normal"], fontSize=9,
+        leading=12, spaceAfter=2, textColor=HexColor("#282828"),
+    )
+    style_finding_meta = ParagraphStyle(
+        "FindingMeta", parent=styles["Normal"], fontSize=9,
+        leading=11, textColor=HexColor("#787878"), spaceAfter=2,
+    )
+    style_rec = ParagraphStyle(
+        "Recommendation", parent=styles["Normal"], fontSize=10,
+        leading=14, spaceAfter=4, leftIndent=12,
+    )
+    style_footer = ParagraphStyle(
+        "Footer", parent=styles["Normal"], fontSize=8,
+        textColor=HexColor("#969696"), spaceBefore=24,
+    )
+
+    severity_colors = {
+        "critical": "#DC2626",
+        "warning": "#D97706",
+        "info": "#2563EB",
+    }
+
+    story = []
+
+    story.append(Paragraph(_xml_escape("File Review Analysis Report"), style_title))
+    story.append(Paragraph(_xml_escape(report["path"]), style_path))
 
     score = report.get("overallScore", "unknown")
     completed = report.get("completedAt", "")
@@ -486,88 +520,72 @@ def _generate_pdf(report: dict) -> bytes:
         except (ValueError, TypeError):
             pass
 
-    pdf.cell(0, 6, _safe(f"Overall Score: {score.replace('-', ' ').title()}    |    {completed}"), new_x="LMARGIN", new_y="NEXT")
+    meta_parts = [f"Overall Score: {score.replace('-', ' ').title()}"]
+    if completed:
+        meta_parts.append(completed)
     if report.get("model"):
-        pdf.cell(0, 6, _safe(f"Model: {report['model']}"), new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(4)
+        meta_parts.append(f"Model: {report['model']}")
+    story.append(Paragraph(_xml_escape("  |  ".join(meta_parts)), style_meta))
 
     if report.get("summary"):
-        pdf.set_text_color(0, 0, 0)
-        pdf.set_font("Helvetica", "B", 12)
-        pdf.cell(0, 8, _safe("Summary"), new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("Helvetica", "", 10)
-        pdf.multi_cell(0, 5, _safe(report["summary"]))
-        pdf.ln(4)
+        story.append(Paragraph("Summary", style_heading))
+        story.append(Paragraph(_xml_escape(report["summary"]), style_body))
 
     findings = report.get("findings", [])
     if findings:
         severity_order = {"critical": 0, "warning": 1, "info": 2}
         findings_sorted = sorted(findings, key=lambda f: severity_order.get(f.get("severity", "info"), 3))
 
-        severity_colors = {
-            "critical": (220, 38, 38),
-            "warning": (217, 119, 6),
-            "info": (37, 99, 235),
-        }
+        story.append(Paragraph(_xml_escape(f"Findings ({len(findings)})"), style_heading))
 
-        pdf.set_font("Helvetica", "B", 12)
-        pdf.set_text_color(0, 0, 0)
-        pdf.cell(0, 8, _safe(f"Findings ({len(findings)})"), new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(2)
-
-        for i, finding in enumerate(findings_sorted):
+        for finding in findings_sorted:
             severity = finding.get("severity", "info")
-            r, g, b = severity_colors.get(severity, (100, 100, 100))
+            color = severity_colors.get(severity, "#646464")
+            title_text = (
+                f'<font color="{color}"><b>[{_xml_escape(severity.upper())}]</b></font> '
+                f'<b>{_xml_escape(finding.get("title", "Untitled"))}</b>'
+            )
+            story.append(Paragraph(title_text, style_finding_title))
 
-            pdf.set_font("Helvetica", "B", 10)
-            pdf.set_text_color(r, g, b)
-            pdf.cell(0, 6, _safe(f"[{severity.upper()}] {finding.get('title', 'Untitled')}"), new_x="LMARGIN", new_y="NEXT")
+            category = finding.get("category", "other")
+            story.append(Paragraph(
+                f'<i>Category: {_xml_escape(category)}</i>', style_finding_meta,
+            ))
 
-            pdf.set_font("Helvetica", "I", 9)
-            pdf.set_text_color(120, 120, 120)
-            pdf.cell(0, 5, _safe(f"Category: {finding.get('category', 'other')}"), new_x="LMARGIN", new_y="NEXT")
+            description = finding.get("description", "")
+            if description:
+                story.append(Paragraph(_xml_escape(description), style_finding_detail))
 
-            pdf.set_font("Helvetica", "", 9)
-            pdf.set_text_color(40, 40, 40)
-            pdf.multi_cell(0, 4.5, _safe(finding.get("description", "")))
-
-            pdf.set_font("Helvetica", "B", 9)
-            pdf.set_text_color(60, 60, 60)
             affected = finding.get("affectedPath", "")
             if affected:
-                pdf.cell(0, 5, _safe(f"Path: {affected}"), new_x="LMARGIN", new_y="NEXT")
+                story.append(Paragraph(
+                    f'<b>Path:</b> {_xml_escape(affected)}', style_finding_meta,
+                ))
 
             expected = finding.get("expectedBehavior", "")
-            actual = finding.get("actualBehavior", "")
             if expected:
-                pdf.set_font("Helvetica", "", 9)
-                pdf.set_text_color(60, 60, 60)
-                pdf.multi_cell(0, 4.5, _safe(f"Expected: {expected}"))
-            if actual:
-                pdf.set_font("Helvetica", "", 9)
-                pdf.set_text_color(60, 60, 60)
-                pdf.multi_cell(0, 4.5, _safe(f"Actual: {actual}"))
+                story.append(Paragraph(
+                    f'<b>Expected:</b> {_xml_escape(expected)}', style_finding_detail,
+                ))
 
-            pdf.ln(4)
+            actual = finding.get("actualBehavior", "")
+            if actual:
+                story.append(Paragraph(
+                    f'<b>Actual:</b> {_xml_escape(actual)}', style_finding_detail,
+                ))
+
+            story.append(Spacer(1, 8))
 
     recommendations = report.get("recommendations", [])
     if recommendations:
-        pdf.set_font("Helvetica", "B", 12)
-        pdf.set_text_color(0, 0, 0)
-        pdf.cell(0, 8, _safe("Recommendations"), new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(2)
-        pdf.set_font("Helvetica", "", 10)
-        pdf.set_text_color(40, 40, 40)
+        story.append(Paragraph("Recommendations", style_heading))
         for j, rec in enumerate(recommendations, 1):
-            pdf.multi_cell(0, 5, _safe(f"{j}. {rec}"))
-            pdf.ln(1)
+            story.append(Paragraph(f"{j}. {_xml_escape(rec)}", style_rec))
 
-    pdf.ln(8)
-    pdf.set_font("Helvetica", "I", 8)
-    pdf.set_text_color(150, 150, 150)
-    pdf.cell(0, 5, _safe("Generated by Madison File Reviews"), new_x="LMARGIN", new_y="NEXT")
+    story.append(Paragraph(_xml_escape("Generated by Madison File Reviews"), style_footer))
 
-    return bytes(pdf.output())
+    doc.build(story)
+    return buf.getvalue()
 
 
 def _serialize_report(row: sqlite3.Row) -> dict:

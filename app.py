@@ -309,6 +309,13 @@ def run_analysis(summary: dict, tier: str = "sonnet") -> dict:
 # API routes
 # ---------------------------------------------------------------------------
 
+HIDDEN_FOLDERS = {"Madison AI Secure Data"}
+
+
+def _is_hidden(path: str) -> bool:
+    return any(name in path for name in HIDDEN_FOLDERS)
+
+
 @app.get("/api/ping")
 async def ping():
     return {"ok": True, "time": datetime.now(timezone.utc).isoformat()}
@@ -316,15 +323,23 @@ async def ping():
 
 @app.get("/api/folders")
 async def get_folders(path: str = "/"):
+    if _is_hidden(path):
+        raise HTTPException(status_code=404, detail="Not found")
     items = await list_folder(path)
+    items = [i for i in items if i.get("display_name") not in HIDDEN_FOLDERS]
     breadcrumbs = build_breadcrumbs(path)
     return {"items": items, "path": path, "breadcrumbs": breadcrumbs}
 
 
 @app.get("/api/folders/tree")
 async def get_folder_tree(path: str = "/", depth: int = 2):
+    if _is_hidden(path):
+        raise HTTPException(status_code=404, detail="Not found")
     items = await list_folder(path)
-    folders = [i for i in items if i.get("type") == "directory"]
+    folders = [
+        i for i in items
+        if i.get("type") == "directory" and i.get("display_name") not in HIDDEN_FOLDERS
+    ]
     tree = [{"name": f.get("display_name", ""), "path": f["path"]} for f in folders]
     return {"tree": tree}
 
